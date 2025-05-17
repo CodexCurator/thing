@@ -1,3 +1,12 @@
+# signal_server.py  (GPT Integrated)
+# ------------------------------------------------------------
+# Minimal signalling server for aiortc P2P chat.
+# Listens on ws://0.0.0.0:8080 and relays JSON messages
+# between the two clients that join the same room.
+#
+#   pip install websockets
+#   python signal_server.py
+# ------------------------------------------------------------
 import asyncio, json, websockets
 
 ROOMS: dict[str, set[websockets.WebSocketServerProtocol]] = {}
@@ -22,9 +31,9 @@ async def handler(ws, _path):
                 del ROOMS[room]
 
 async def main():
-    print("Signalling server listening on port8080 …")
+    print("Signalling server listening on port 8080 …")
     async with websockets.serve(handler, "0.0.0.0", 8080):
         await asyncio.Future()        # run forever
 
-if name == "main":
+if __name__ == "__main__":
     asyncio.run(main())
