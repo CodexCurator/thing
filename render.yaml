@@ -1,8 +1,15 @@
 services:
   - type: web
-    name: signal-server
-    env: python
-    plan: free
-    buildCommand: ""
+    name: p2p-signal-server          # pick any display name you like
+    env: python                      # tells Render to use its Python build‑pack
+
+    # Render installs your deps automatically, but it’s good practice to be explicit
+    buildCommand: pip install -r requirements.txt
+
+    # The command that starts the server
     startCommand: python signal_server.py
-    autoDeploy: true
+
+    # Optional – keeps stdout/err un‑buffered so logs show up immediately
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: "1"
