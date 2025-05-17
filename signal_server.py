@@ -1,39 +1,64 @@
-# signal_server.py  (GPT Integrated)
-# ------------------------------------------------------------
-# Minimal signalling server for aiortc P2P chat.
-# Listens on ws://0.0.0.0:8080 and relays JSON messages
-# between the two clients that join the same room.
+#!/usr/bin/env python3
+# --------------------------------------------------------------------
+# signal_server.py  –  ultra‑small relay for ONE pair of WebRTC peers
+#
+# • Keeps a global set of connected WebSocket clients (max 2).
+# • Whatever JSON one peer sends is forwarded verbatim to the other.
+# • GET /healthz  →  200 OK   (handy for uptime monitors).
 #
 #   pip install websockets
-#   python signal_server.py
-# ------------------------------------------------------------
-import asyncio, json, websockets
+#   python signal_server.py            # runs on :8080 locally
+#   PORT=10000 python signal_server.py # Render will provide $PORT
+# --------------------------------------------------------------------
+import asyncio, json, os, websockets
+from typing import Set
 
-ROOMS: dict[str, set[websockets.WebSocketServerProtocol]] = {}
+CLIENTS: Set[websockets.WebSocketServerProtocol] = set()
 
-async def handler(ws, _path):
-    room = None
+async def handler(ws: websockets.WebSocketServerProtocol, path: str):
+    """
+    Runs for each WebSocket connection.  Simply relays every message to the
+    *other* connected client (if any).
+    """
+    CLIENTS.add(ws)
+    print(f"[+] client connected  (total={len(CLIENTS)})")
     try:
-        async for raw in ws:
-            msg = json.loads(raw)
-            if msg["type"] == "join":
-                # create / enter room
-                room = msg["room"]
-                ROOMS.setdefault(room, set()).add(ws)
-            else:
-                # relay to the other peer(s) in the room
-                targets = ROOMS.get(room, set()) - {ws}
-                await asyncio.gather(*(t.send(raw) for t in targets))
+        async for msg in ws:
+            # forward to everyone except the sender
+            others = CLIENTS - {ws}
+            await asyncio.gather(*(peer.send(msg) for peer in others))
     finally:
-        if room and ws in ROOMS.get(room, ()):
-            ROOMS[room].discard(ws)
-            if not ROOMS[room]:
-                del ROOMS[room]
+        CLIENTS.discard(ws)
+        print(f"[-] client disconnected (total={len(CLIENTS)})")
 
-async def main():
-    print("Signalling server listening on port8080 …")
-    async with websockets.serve(handler, "0.0.0.0", 8080):
-        await asyncio.Future()        # run forever
+# ---- plain HTTP handler ----------------------------------------------------
+async def process_request(path, _request_headers):
+    """
+    Anything hitting GET /healthz gets a fast 200 OK so uptime monitors
+    won't see a 400 Bad Request.
+    """
+    if path == "/healthz":
+        body = b"OK"
+        return 200, [
+            ("Content-Type", "text/plain"),
+            ("Content-Length", str(len(body)))
+        ], body
+    # For all other paths let the WebSocket handshake continue.
+    return None
+
+# ---- main ------------------------------------------------------------------
+async def main() -> None:
+    port = int(os.environ.get("PORT", 8080))
+    print(f"Signalling server listening on :{port}")
+    async with websockets.serve(
+        handler,
+        "0.0.0.0",
+        port,
+        ping_interval=15,
+        ping_timeout=15,
+        process_request=process_request,
+    ):
+        await asyncio.Future()           # run forever
 
 if __name__ == "__main__":
     asyncio.run(main())
