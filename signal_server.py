@@ -1,50 +1,62 @@
 #!/usr/bin/env python3
-# --------------------------------------------------------------------
-# signal_server.py – relay for ONE WebRTC pair
-# * max_size=None  → never reject large SDPs
-# * broadcasts {"type":"peers","count":N}
-# * /healthz returns 200 to GET or HEAD
-# --------------------------------------------------------------------
+"""
+Minimal, room‑less signalling server for aiortc P2P chat.
+• Listens on ws://0.0.0.0:$PORT  (Render sets $PORT, default 8080)
+• Relays every JSON message to the *other* connected client(s)
+• Emits {"type":"peers","count":N} whenever the number of clients changes
+• Replies “OK” to GET / and /health  →  works with UptimeRobot
+"""
 import asyncio, json, os, websockets
 from typing import Set
 
 CLIENTS: Set[websockets.WebSocketServerProtocol] = set()
 
-async def _broadcast_peer_count():
-    msg = json.dumps({"type": "peers", "count": len(CLIENTS)})
-    await asyncio.gather(*(c.send(msg) for c in CLIENTS if not c.closed))
+# ── helpers ────────────────────────────────────────────────────────────
+async def broadcast(raw: str, *, exclude: Set = frozenset()):
+    """Send raw string to all clients except those in *exclude*."""
+    if CLIENTS:
+        await asyncio.gather(
+            *[c.send(raw) for c in CLIENTS - exclude],
+            return_exceptions=True,     # ignore broken pipes
+        )
 
-async def handler(ws, _):
+async def notify_peers():
+    """Tell everyone how many peers are currently connected."""
+    await broadcast(json.dumps({"type": "peers", "count": len(CLIENTS)}))
+
+# ── main handler ───────────────────────────────────────────────────────
+async def handler(ws, _path):
     CLIENTS.add(ws)
-    await _broadcast_peer_count()
+    await notify_peers()
     try:
-        async for raw in ws:
-            print(f"[server] relay {len(raw)} bytes")
-            await asyncio.gather(*(o.send(raw) for o in CLIENTS - {ws}),
-                                 return_exceptions=True)
-    except websockets.ConnectionClosedError:
-        pass
+        async for raw in ws:            # just relay everything
+            await broadcast(raw, exclude={ws})
     finally:
         CLIENTS.discard(ws)
-        await _broadcast_peer_count()
+        await notify_peers()
 
-async def process_request(path, headers):
-    if path == "/healthz":
-        if headers.raw_headers[0][0].decode().split()[0] in {"GET", "HEAD"}:
-            body = b"OK" if headers.raw_headers[0][0].startswith(b"GET") else b""
-            return 200, [("Content-Type", "text/plain"),
-                         ("Content-Length", str(len(body)))], body
-    return None
+# ── HTTP “health check” (Render & UptimeRobot ping this) ───────────────
+async def process_request(path, _hdrs):
+    if path in ("/", "/health"):
+        return 200, [("Content-Type", "text/plain")], b"OK\n"
+    return None                         # continue WebSocket handshake
 
+# ── entry‑point ────────────────────────────────────────────────────────
 async def main():
-    port = int(os.environ.get("PORT", 8080))
-    print(f"signalling server on :{port}")
-    async with websockets.serve(handler, "0.0.0.0", port,
-                                max_size=None,                 # ← unlimited
-                                ping_interval=15,
-                                ping_timeout=15,
-                                process_request=process_request):
-        await asyncio.Future()
+    port = int(os.getenv("PORT", "8080"))
+    print(f"Signalling server listening on 0.0.0.0:{port}")
+    async with websockets.serve(
+        handler,
+        host="0.0.0.0",
+        port=port,
+        ping_interval=20,
+        ping_timeout=20,
+        process_request=process_request,
+    ):
+        await asyncio.Future()          # run forever
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
