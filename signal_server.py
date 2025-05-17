@@ -1,48 +1,54 @@
 #!/usr/bin/env python3
 # --------------------------------------------------------------------
-# signal_server.py – ultra‑light relay for ONE chat pair
+# signal_server.py – ultra‑small relay for ONE WebRTC pair
 #
-# * Broadcasts {"type":"peers","count":N} whenever the number of
-#   connected clients changes (0‑2 only).
-# * Relays every JSON line *verbatim* between the two peers.
-# * GET /healthz → 200 OK  (for uptime monitors).
-# * Silences “no close frame received” noise.
+# • Keeps at most two WebSocket clients; broadcasts {"type":"peers"} on
+#   every join/leave so the GUI knows when both are present.
+# • Relays all JSON messages verbatim between the two peers.
+# • GET or HEAD  /healthz  → 200 OK   (for uptime monitors).
+# • Silences “no close frame received” noise.
+#
+#   pip install websockets
+#   python signal_server.py             # local (port 8080)
+#   # Render will provide $PORT env var automatically
 # --------------------------------------------------------------------
 import asyncio, json, os, websockets
 from typing import Set
 
 CLIENTS: Set[websockets.WebSocketServerProtocol] = set()
 
-async def broadcast_peer_count() -> None:
+async def _broadcast_peer_count() -> None:
     msg = json.dumps({"type": "peers", "count": len(CLIENTS)})
     await asyncio.gather(*(c.send(msg) for c in CLIENTS if not c.closed))
 
 async def handler(ws: websockets.WebSocketServerProtocol, _path: str):
     CLIENTS.add(ws)
-    await broadcast_peer_count()
+    await _broadcast_peer_count()
     try:
-        async for raw in ws:
-            # fan‑out to the *other* peer(s)
-            targets = CLIENTS - {ws}
-            await asyncio.gather(*(t.send(raw) for t in targets), return_exceptions=True)
+        async for raw in ws:                          # relay everything
+            others = CLIENTS - {ws}
+            await asyncio.gather(*(o.send(raw) for o in others),
+                                 return_exceptions=True)
     except websockets.ConnectionClosedError:
-        # client vanished without a close‑frame – ignore
-        pass
+        pass                                          # ignore noisy close errors
     finally:
         CLIENTS.discard(ws)
-        await broadcast_peer_count()
+        await _broadcast_peer_count()
 
-# -------- plain HTTP for /healthz ----------------------------------
-async def process_request(path, _headers):
+# ---------- plain HTTP for /healthz (HEAD or GET) -------------------
+async def process_request(path, request_headers):
     if path == "/healthz":
-        body = b"OK"
-        return 200, [
-            ("Content-Type", "text/plain"),
-            ("Content-Length", str(len(body))),
-        ], body
-    return None  # let the WS handshake continue
+        # websockets exposes the first request line in raw_headers[0][0]
+        method = request_headers.raw_headers[0][0].decode().split()[0]
+        if method in {"GET", "HEAD"}:
+            body = b"OK" if method == "GET" else b""
+            return 200, [
+                ("Content-Type", "text/plain"),
+                ("Content-Length", str(len(body))),
+            ], body
+    return None  # let WebSocket handshake continue
 
-# -------- main ------------------------------------------------------
+# ---------- main ----------------------------------------------------
 async def main():
     port = int(os.environ.get("PORT", 8080))
     print(f"Signalling server listening on :{port}")
