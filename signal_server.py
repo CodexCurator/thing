@@ -1,62 +1,30 @@
-#!/usr/bin/env python3
-"""
-Minimal, room‑less signalling server for aiortc P2P chat.
-• Listens on ws://0.0.0.0:$PORT  (Render sets $PORT, default 8080)
-• Relays every JSON message to the *other* connected client(s)
-• Emits {"type":"peers","count":N} whenever the number of clients changes
-• Replies “OK” to GET / and /health  →  works with UptimeRobot
-"""
-import asyncio, json, os, websockets
-from typing import Set
+import asyncio, json, websockets
 
-CLIENTS: Set[websockets.WebSocketServerProtocol] = set()
+ROOMS: dict[str, set[websockets.WebSocketServerProtocol]] = {}
 
-# ── helpers ────────────────────────────────────────────────────────────
-async def broadcast(raw: str, *, exclude: Set = frozenset()):
-    """Send raw string to all clients except those in *exclude*."""
-    if CLIENTS:
-        await asyncio.gather(
-            *[c.send(raw) for c in CLIENTS - exclude],
-            return_exceptions=True,     # ignore broken pipes
-        )
-
-async def notify_peers():
-    """Tell everyone how many peers are currently connected."""
-    await broadcast(json.dumps({"type": "peers", "count": len(CLIENTS)}))
-
-# ── main handler ───────────────────────────────────────────────────────
 async def handler(ws, _path):
-    CLIENTS.add(ws)
-    await notify_peers()
+    room = None
     try:
-        async for raw in ws:            # just relay everything
-            await broadcast(raw, exclude={ws})
+        async for raw in ws:
+            msg = json.loads(raw)
+            if msg["type"] == "join":
+                # create / enter room
+                room = msg["room"]
+                ROOMS.setdefault(room, set()).add(ws)
+            else:
+                # relay to the other peer(s) in the room
+                targets = ROOMS.get(room, set()) - {ws}
+                await asyncio.gather(*(t.send(raw) for t in targets))
     finally:
-        CLIENTS.discard(ws)
-        await notify_peers()
+        if room and ws in ROOMS.get(room, ()):
+            ROOMS[room].discard(ws)
+            if not ROOMS[room]:
+                del ROOMS[room]
 
-# ── HTTP “health check” (Render & UptimeRobot ping this) ───────────────
-async def process_request(path, _hdrs):
-    if path in ("/", "/health"):
-        return 200, [("Content-Type", "text/plain")], b"OK\n"
-    return None                         # continue WebSocket handshake
-
-# ── entry‑point ────────────────────────────────────────────────────────
 async def main():
-    port = int(os.getenv("PORT", "8080"))
-    print(f"Signalling server listening on 0.0.0.0:{port}")
-    async with websockets.serve(
-        handler,
-        host="0.0.0.0",
-        port=port,
-        ping_interval=20,
-        ping_timeout=20,
-        process_request=process_request,
-    ):
-        await asyncio.Future()          # run forever
+    print("Signalling server listening on port8080 …")
+    async with websockets.serve(handler, "0.0.0.0", 8080):
+        await asyncio.Future()        # run forever
 
-if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        pass
+if name == "main":
+    asyncio.run(main())
